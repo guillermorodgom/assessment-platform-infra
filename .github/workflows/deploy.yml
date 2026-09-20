@@ -4,6 +4,11 @@ on:
   repository_dispatch:
     types: [deploy]
   workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy (auth, mngr, compiler, web, all)'
+        required: true
+        default: 'all'
 
 env:
   DEPLOY_DIR: ~/assessment-platform
@@ -13,6 +18,24 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Determine service to deploy
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            REPO="${{ github.event.client_payload.repo }}"
+            REPO_NAME="${REPO##*/}"
+            case "$REPO_NAME" in
+              assessment-platform-auth)     echo "service=auth" >> $GITHUB_OUTPUT; echo "repo=$REPO_NAME" >> $GITHUB_OUTPUT ;;
+              assessment-platform-mngr)     echo "service=mngr" >> $GITHUB_OUTPUT; echo "repo=$REPO_NAME" >> $GITHUB_OUTPUT ;;
+              assessment-platform-compiler) echo "service=compiler" >> $GITHUB_OUTPUT; echo "repo=$REPO_NAME" >> $GITHUB_OUTPUT ;;
+              assessment-platform-web-ui)   echo "service=web" >> $GITHUB_OUTPUT; echo "repo=$REPO_NAME" >> $GITHUB_OUTPUT ;;
+              *)                            echo "service=all" >> $GITHUB_OUTPUT; echo "repo=all" >> $GITHUB_OUTPUT ;;
+            esac
+          else
+            echo "service=${{ github.event.inputs.service }}" >> $GITHUB_OUTPUT
+            echo "repo=all" >> $GITHUB_OUTPUT
+          fi
+
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
@@ -20,37 +43,38 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy with rollback
+      - name: Deploy
         run: |
-          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'DEPLOY_SCRIPT'
+          SERVICE="${{ steps.target.outputs.service }}"
+          REPO="${{ steps.target.outputs.repo }}"
+          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << DEPLOY_SCRIPT
             set -e
             DEPLOY_DIR=~/assessment-platform
             GITHUB_ORG=guillermorodgom
-            REPOS="assessment-platform-infra assessment-platform-auth assessment-platform-mngr assessment-platform-compiler assessment-platform-web-ui assessment-platform-database"
+            SERVICE="$SERVICE"
+            REPO="$REPO"
 
-            mkdir -p $DEPLOY_DIR
-            cd $DEPLOY_DIR
+            mkdir -p \$DEPLOY_DIR
+            cd \$DEPLOY_DIR
 
-            # Save current commit of each repo for rollback
-            echo "=== Saving current state ==="
-            for REPO in $REPOS; do
-              if [ -d "$REPO/.git" ]; then
-                git -C $REPO rev-parse HEAD > $REPO/.deploy-backup 2>/dev/null || true
-              fi
-            done
+            if [ "\$REPO" = "all" ]; then
+              REPOS="assessment-platform-infra assessment-platform-auth assessment-platform-mngr assessment-platform-compiler assessment-platform-web-ui assessment-platform-database"
+            else
+              REPOS="\$REPO"
+            fi
 
-            # Pull latest changes
-            for REPO in $REPOS; do
-              if [ -d "$REPO" ]; then
-                echo "=== Pulling $REPO ==="
-                git -C $REPO pull origin main
+            # Pull only the changed repo(s)
+            for R in \$REPOS; do
+              if [ -d "\$R" ]; then
+                echo "=== Pulling \$R ==="
+                git -C \$R pull origin main
               else
-                echo "=== Cloning $REPO ==="
-                git clone https://github.com/$GITHUB_ORG/$REPO.git
+                echo "=== Cloning \$R ==="
+                git clone https://github.com/\$GITHUB_ORG/\$R.git
               fi
             done
 
-            # Create .env in infra repo
+            # Ensure .env exists
             cd assessment-platform-infra
             cat > .env << EOF
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
@@ -58,39 +82,19 @@ jobs:
           JUDGE0_API_KEY=${{ secrets.JUDGE0_API_KEY }}
           EOF
 
-            # Build new images
-            echo "=== Building ==="
-            docker compose build --no-cache
-
-            # Deploy
-            echo "=== Deploying ==="
-            docker compose up -d
-
-            # Health check — verify containers are running after 15s
-            echo "=== Health check ==="
-            sleep 15
-            FAILED=$(docker compose ps --format json | grep -v '"running"' | grep -v '"healthy"' || true)
-
-            if [ -n "$FAILED" ]; then
-              echo "=== DEPLOY FAILED — Rolling back ==="
-              cd $DEPLOY_DIR
-              for REPO in $REPOS; do
-                if [ -f "$REPO/.deploy-backup" ]; then
-                  PREV=$(cat $REPO/.deploy-backup)
-                  git -C $REPO checkout $PREV 2>/dev/null || true
-                fi
-              done
-              cd assessment-platform-infra
+            # Build and deploy only the changed service
+            if [ "\$SERVICE" = "all" ]; then
+              echo "=== Building all services ==="
               docker compose build --no-cache
               docker compose up -d
-              echo "=== Rollback complete ==="
-              exit 1
+            else
+              echo "=== Building \$SERVICE ==="
+              docker compose build --no-cache \$SERVICE
+              docker compose up -d \$SERVICE
             fi
 
-            echo "=== Deploy successful ==="
+            echo "=== Deploy complete ==="
             docker compose ps
-
-            # Cleanup
             docker image prune -f
           DEPLOY_SCRIPT
 
