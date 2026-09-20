@@ -1,0 +1,69 @@
+name: Deploy to EC2 🚀
+
+on:
+  push:
+    branches: [main]
+  repository_dispatch:
+    types: [deploy]
+  workflow_dispatch:
+
+env:
+  DEPLOY_DIR: ~/assessment-platform
+  GITHUB_ORG: guillermorodgom
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Clone/pull all repos and deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'DEPLOY_SCRIPT'
+            set -e
+            DEPLOY_DIR=~/assessment-platform
+            GITHUB_ORG=guillermorodgom
+            REPOS="assessment-platform-infra assessment-platform-auth assessment-platform-mngr assessment-platform-compiler assessment-platform-web-ui assessment-platform-database"
+
+            mkdir -p $DEPLOY_DIR
+            cd $DEPLOY_DIR
+
+            # Clone or pull each repo
+            for REPO in $REPOS; do
+              if [ -d "$REPO" ]; then
+                echo "=== Pulling $REPO ==="
+                git -C $REPO pull origin main
+              else
+                echo "=== Cloning $REPO ==="
+                git clone https://github.com/$GITHUB_ORG/$REPO.git
+              fi
+            done
+
+            # Create .env in infra repo
+            cd assessment-platform-infra
+            cat > .env << EOF
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          JUDGE0_API_KEY=${{ secrets.JUDGE0_API_KEY }}
+          EOF
+
+            # Build and deploy
+            docker compose build --no-cache
+            docker compose up -d
+
+            # Verify
+            sleep 10
+            docker compose ps
+
+            # Cleanup
+            docker image prune -f
+          DEPLOY_SCRIPT
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
