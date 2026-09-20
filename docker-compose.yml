@@ -1,0 +1,75 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../assessment-platform-database/00-init-schema.sql:/docker-entrypoint-initdb.d/00-init-schema.sql
+      - ../assessment-platform-database/01-schema-postgres.sql:/docker-entrypoint-initdb.d/01-schema-postgres.sql
+      - ../assessment-platform-database/02-seed-data.sql:/docker-entrypoint-initdb.d/02-seed-data.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - assessment-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  auth:
+    build: ../assessment-platform-auth
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/postgres?currentSchema=assessment_platform
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:-docker-secret-change-me-min-256-bits-0123456789abcdef}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - assessment-net
+
+  mngr:
+    build: ../assessment-platform-mngr
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/postgres?currentSchema=assessment_platform
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:-docker-secret-change-me-min-256-bits-0123456789abcdef}
+      COMPILER_API_URL: http://compiler:8083
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - assessment-net
+
+  compiler:
+    build: ../assessment-platform-compiler
+    environment:
+      JUDGE0_API_KEY: ${JUDGE0_API_KEY:-}
+    networks:
+      - assessment-net
+
+  web:
+    build: ../assessment-platform-web-ui
+    ports:
+      - "80:80"
+    depends_on:
+      - auth
+      - mngr
+      - compiler
+    networks:
+      - assessment-net
+
+volumes:
+  pgdata:
+
+networks:
+  assessment-net:
