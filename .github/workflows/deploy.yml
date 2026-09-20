@@ -1,8 +1,6 @@
 name: Deploy to EC2 🚀
 
 on:
-  push:
-    branches: [main]
   repository_dispatch:
     types: [deploy]
   workflow_dispatch:
@@ -22,7 +20,7 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Clone/pull all repos and deploy
+      - name: Deploy with rollback
         run: |
           ssh -i ~/.ssh/deploy_key ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'DEPLOY_SCRIPT'
             set -e
@@ -33,7 +31,15 @@ jobs:
             mkdir -p $DEPLOY_DIR
             cd $DEPLOY_DIR
 
-            # Clone or pull each repo
+            # Save current commit of each repo for rollback
+            echo "=== Saving current state ==="
+            for REPO in $REPOS; do
+              if [ -d "$REPO/.git" ]; then
+                git -C $REPO rev-parse HEAD > $REPO/.deploy-backup 2>/dev/null || true
+              fi
+            done
+
+            # Pull latest changes
             for REPO in $REPOS; do
               if [ -d "$REPO" ]; then
                 echo "=== Pulling $REPO ==="
@@ -52,12 +58,36 @@ jobs:
           JUDGE0_API_KEY=${{ secrets.JUDGE0_API_KEY }}
           EOF
 
-            # Build and deploy
+            # Build new images
+            echo "=== Building ==="
             docker compose build --no-cache
+
+            # Deploy
+            echo "=== Deploying ==="
             docker compose up -d
 
-            # Verify
-            sleep 10
+            # Health check — verify containers are running after 15s
+            echo "=== Health check ==="
+            sleep 15
+            FAILED=$(docker compose ps --format json | grep -v '"running"' | grep -v '"healthy"' || true)
+
+            if [ -n "$FAILED" ]; then
+              echo "=== DEPLOY FAILED — Rolling back ==="
+              cd $DEPLOY_DIR
+              for REPO in $REPOS; do
+                if [ -f "$REPO/.deploy-backup" ]; then
+                  PREV=$(cat $REPO/.deploy-backup)
+                  git -C $REPO checkout $PREV 2>/dev/null || true
+                fi
+              done
+              cd assessment-platform-infra
+              docker compose build --no-cache
+              docker compose up -d
+              echo "=== Rollback complete ==="
+              exit 1
+            fi
+
+            echo "=== Deploy successful ==="
             docker compose ps
 
             # Cleanup
