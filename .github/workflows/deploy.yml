@@ -90,7 +90,7 @@ jobs:
             else
               echo "=== Building \$SERVICE ==="
               docker compose build --no-cache \$SERVICE
-              docker compose up -d \$SERVICE
+              docker compose up -d --no-deps \$SERVICE
             fi
 
             echo "=== Deploy complete ==="
